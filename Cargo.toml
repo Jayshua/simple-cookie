@@ -1,0 +1,14 @@
+[package]
+name = "simple-cookie"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Jayshua Nelson <me@jayshuanelson.com>"]
+repository = "https://github.com/Jayshua/simple-cookie"
+readme = "README.md"
+description = "Functions for creating and parsing signed & encrypted cookies."
+
+[dependencies]
+base64 = { version = "0.21.0", features = [] }
+aes-gcm = { version = "0.10.1", features = ["aes"] }
+rand = { version = "0.8.5", features = ["std", "std_rng"] }

@@ -1,19 +1,17 @@
-# Simple-Cookie
-
 Functions for creating and parsing signed & encrypted cookies.
 
-The [cookie](https://crates.io/crates/cookie) crate is the de-facto secure cookie library in Rust.
+The [cookie](https://crates.io/crates/cookie) crate is the de facto secure cookie library in Rust.
 It is Way Too Complicated (TM) for what I need. (And, in my opinion, for what most people need.)
 This is the 80% solution for 20% of the effort.
 
 This library has only two goals:
-- A simple, easily auditable implementation of singing, encrypting, decrypting & verifying cookies.
+- A simple, easily auditable implementation of signing, encrypting, decrypting & verifying cookies.
 - Clear comments pointing out security issues and describing how to avoid them.
 
 The goals of this library are *not*:
 - Automatically detecting when a new Set-Cookie header is required.
 - Tracking changes to cookies.
-- Validating cookie name compliance with [RFC6265](https://datatracker.ietf.org/doc/html/rfc6265). (Just don't use any weird cookie es.)
+- Validating cookie name compliance with [RFC6265](https://datatracker.ietf.org/doc/html/rfc6265). (Just don't use any weird cookie names.)
 - Any kind of cookie "jar" functionality.
 - Literally anything else.
 
@@ -54,7 +52,7 @@ let signing_key = [0; 32];
 let header = b"Cookie: session=gNm1wQ6lTTgAxLxfD2ntNS2nIBVcnjSmI+7FdFk; another-cookie=another-value";
 
 // parse_cookie_header_value doesn't expect the header name.
-// you don't normally need this step since HTTP libraries typically automatically parse
+// You don't normally need this step since HTTP libraries typically automatically parse
 // the header name & value into separate parts of a tuple or struct or something.
 let header = &header[8..];
 

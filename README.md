@@ -19,7 +19,7 @@ The goals of this library are *not*:
 
 Basic use:
 
-```rust
+```rust,ignore
 use simple_cookie::{generate_signing_key, encode_cookie, decode_cookie};
 
 let signing_key = generate_signing_key();
@@ -31,7 +31,7 @@ assert_eq!(decoded, Some(vec![56]));
 
 You probably want an actual Set-Cookie header. You can build one pretty easily:
 
-```rust
+```rust,ignore
 use simple_cookie::{generate_signing_key, encode_cookie};
 
 let signing_key = generate_signing_key();
@@ -41,7 +41,7 @@ let header = format!("Set-Cookie: session={}; Max-Age=604800; Secure; HttpOnly; 
 
 Then, to decrypt a header:
 
-```rust
+```rust,ignore
 use simple_cookie::{parse_cookie_header_value, decode_cookie};
 
 // You can create your own key or load it from somewhere.

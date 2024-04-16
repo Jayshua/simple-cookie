@@ -1,12 +1,6 @@
 #![doc = include_str!("../README.md")]
+#![cfg_attr(all(not(std), not(debug_assertions)), no_std)]
 
-
-
-/// A bit of cryptographically secure random data is attached to every encoded cookie so that
-/// identical values don't have identical encoded representations. This prevents attackers
-/// from determining the value of an encoded cookie by comparing it to the encoded value of
-/// a known cookie.
-const NONCE_LENGTH: usize = 12;
 
 
 
@@ -21,16 +15,38 @@ const NONCE_LENGTH: usize = 12;
 /// - The cookie needs to be read by an entirely separate unrelated server (say, a caching server or something)
 pub type SigningKey = [u8; 32];
 
+/// A bit of random data attached to every cookie before encrypting to avoid the same cookie
+/// value being encrypted into the same bits.
+///
+/// Use [generate_nonce] to create one, or make your own from **cryptographically secure** random data.
+pub type Nonce = [u8; 12];
+
+const NONCE_LENGTH: usize = core::mem::size_of::<Nonce>();
+const SIGNATURE_LENGTH: usize = 16;
+
 
 
 /// Generate a new signing key for use with the [encode_cookie] and [decode_cookie] functions.
 ///
 /// This uses the thread-local random number generator, which is guaranteed by the rand crate
 /// to produce cryptographically secure random data.
+#[cfg(any(test, feature="rand"))]
 pub fn generate_signing_key() -> SigningKey {
-    use rand::RngCore;
     let mut data = [0; 32];
-    rand::thread_rng().fill_bytes(&mut data);
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut data);
+    data
+}
+
+
+
+/// Generate a new nonce for encrypting a cookie with the [encode_cookie] function
+///
+/// This uses the thread-local random number generator, which is guaranteed by the rand crate
+/// to produce cryptographically secure random data.
+#[cfg(any(test, feature="rand"))]
+pub fn generate_nonce() -> Nonce {
+    let mut data = [0; 12];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut data);
     data
 }
 
@@ -60,7 +76,7 @@ pub fn parse_cookie_header_value(header: &[u8]) -> impl Iterator<Item = (&str, &
 
             let key: &[u8] = key_value_iterator.next()?;
             let key: &[u8] = trim_ascii_whitespace(key);
-            let key: &str = std::str::from_utf8(key).ok()?;
+            let key: &str = core::str::from_utf8(key).ok()?;
 
             let value: &[u8] = trim_ascii_whitespace(key_value_iterator.next()?);
             let value: &[u8] = value.strip_prefix(&[b'"']).unwrap_or(value);
@@ -123,47 +139,167 @@ fn trim_ascii_whitespace(slice: &[u8]) -> &[u8] {
 /// The name will be included in the encrypted value and verified against the name you provide
 /// when calling [decode_cookie] later.
 ///
+/// You can use the [output_len] function to get the required size of the buffer.
+///
 /// ## Other Notes
 /// [RFC6265](https://datatracker.ietf.org/doc/html/rfc6265) restricts the characters valid in cookie names. This function does *not* validate the name you provide.
 ///
 /// Inspired by the [cookie](https://crates.io/crates/cookie) crate.
-pub fn encode_cookie<Name: AsRef<str>, Value: AsRef<[u8]>>(key: &SigningKey, name: Name, value: Value) -> String {
+pub fn encode_cookie(key: SigningKey, nonce: Nonce, name: impl AsRef<[u8]>, value: impl AsRef<[u8]>, output: &mut [u8]) -> Result<(), EncodeError> {
     let value: &[u8] = value.as_ref();
-    let name: &str = name.as_ref();
+
+    let expected_size = decode_buffer_size(value.len());
+    if output.len() != expected_size {
+        return Err(EncodeError::IncorrectBufferSize { expected_size });
+    }
 
     // Final message will be [nonce, encrypted_value, signature]
-    let mut data = vec![0; NONCE_LENGTH + value.len() + 16];
+    // Split the output buffer apart into mutable slices for each component
+    let (nonce_slot, rest_of_output) = output.split_at_mut(NONCE_LENGTH);
+    let (encrypted_slot, rest_of_output) = rest_of_output.split_at_mut(value.len());
+    let (signature_slot, _rest_of_output) = rest_of_output.split_at_mut(SIGNATURE_LENGTH);
 
-    // Split the data vec apart into mutable slices for each component
-    let (nonce_slot, message_and_tag) = data.split_at_mut(NONCE_LENGTH);
-    let (encrypted_slot, signature_slot) = message_and_tag.split_at_mut(value.len());
-
-    // Generate some random data for the nonce
-    use rand::RngCore;
-    rand::thread_rng().fill_bytes(nonce_slot);
+    // Generate some random output for the nonce
+    nonce_slot.copy_from_slice(&nonce);
 
     // Copy the unencrypted message into the slot for the encrypted message
     // (It will be encrypted in-place.)
     encrypted_slot.copy_from_slice(value);
 
     // Encrypt the message
-    // This encryption method has a convenient associated data option that will be part
+    // This encryption method has a convenient associated output option that will be part
     // of the signature, so we'll drop the cookie name into that rather than doing something
     // more complex like concatenating the message and name ourselves.
     use aes_gcm::{AeadInPlace, KeyInit};
-    let key_array = aes_gcm::aead::generic_array::GenericArray::from_slice(key);
+    let key_array = aes_gcm::aead::generic_array::GenericArray::from_slice(&key);
     let nonce_array = aes_gcm::aead::generic_array::GenericArray::from_slice(nonce_slot);
     let encryptor = aes_gcm::Aes256Gcm::new(key_array);
     let signature = encryptor
-        .encrypt_in_place_detached(&nonce_array, name.as_bytes(), encrypted_slot)
+        .encrypt_in_place_detached(&nonce_array, name.as_ref(), encrypted_slot)
         .expect("failed to encrypt");
 
-    // Copy the signature into the final message
+    // The signature is returned from aes_gcm rather than being written into the output buffer,
+    // so we need to write it in ourselves.
     signature_slot.copy_from_slice(&signature);
 
-    use base64::Engine;
-    base64::engine::general_purpose::STANDARD_NO_PAD.encode(&data)
+    // Cookie values must be in the ASCII printable range
+    base64_encode_in_place(NONCE_LENGTH + value.len() + SIGNATURE_LENGTH, output);
+
+    Ok(())
 }
+
+#[derive(Debug)]
+pub enum EncodeError {
+    IncorrectBufferSize {
+        /// Expected size of the output buffer, or None if the expected size would overflow a usize.
+        expected_size: usize
+    },
+}
+
+
+/// Get the required size of the output buffer passed to encode_cookie for the given value length
+pub const fn decode_buffer_size(value_length: usize) -> usize {
+    base64_encode_buffer_size(NONCE_LENGTH + value_length + SIGNATURE_LENGTH)
+}
+
+
+
+
+// I couldn't find an in-place version of this function on crates.io, so here we are
+fn base64_encode_in_place(length: usize, data: &mut [u8]) {
+    let data_len = data.len();
+
+    let (mut input_index, mut output_index) =
+        if 2 == length % 3 {
+            encode_segment(data[length - 2], data[length - 1], 0, &mut data[data_len - 4..]);
+            data[data_len - 1] = b'=';
+            (length.saturating_sub(2), data.len().saturating_sub(4))
+        }
+        else if 1 == length % 3 {
+            encode_segment(data[length - 1], 0, 0, &mut data[data_len - 4..]);
+            data[data_len - 1] = b'=';
+            data[data_len - 2] = b'=';
+            (length.saturating_sub(1), data.len().saturating_sub(4))
+        }
+        else {
+            (length, data.len())
+        };
+
+    while input_index > 0 {
+        output_index -= 4;
+        input_index -= 3;
+        encode_segment(data[input_index + 0], data[input_index + 1], data[input_index + 2], &mut data[output_index..][..4]);
+    }
+}
+
+/// Encode the given 3 bytes into the first 4 bytes of the
+/// output slice according to the base64 alphabet.
+///
+/// Helper function for [base64_encode_in_place]
+fn encode_segment(a: u8, b: u8, c: u8, output: &mut [u8]) {
+    let (a, b, c) = (a as u32, b as u32, c as u32);
+
+    let temp = a << 16 | b << 8 | c;
+
+    let a = (temp >> 18) & 0b111111;
+    let b = (temp >> 12) & 0b111111;
+    let c = (temp >>  6) & 0b111111;
+    let d = (temp >>  0) & 0b111111;
+
+    output[0] = ALPHABET[a as usize];
+    output[1] = ALPHABET[b as usize];
+    output[2] = ALPHABET[c as usize];
+    output[3] = ALPHABET[d as usize];
+}
+
+/// Calculate the length of the encoded representation of a buffer with the given length
+const fn base64_encode_buffer_size(data_length: usize) -> usize {
+    4 * ((data_length + 2) / 3)
+}
+
+const fn base64_decoded_size(encoded_size: usize) -> usize {
+    ((encoded_size * 3) / 4)
+}
+
+/// Standard base64 alphabet
+const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+
+
+
+// The only reason this code exists is because I couldn't find a library for base64_encode_in_place
+// and it seemed silly to bring an entire library in (especially one as complex as the defacto `base64` crate)
+// for a single function
+// fn base64_decode_in_place(data: &mut [u8])
+
+
+#[test]
+fn test_base64_encode() {
+    // Poor man's fuzz testing
+    let seed = rand::Rng::gen_range(&mut rand::thread_rng(), 100_000_000..999_999_999);
+    let mut random = oorandom::Rand64::new(seed);
+    println!("Seed: {}", seed);
+
+    for _ in 0..100 {
+        let length = random.rand_range(0..50);
+        let mut data = vec![0; length as usize];
+        for entry in data.iter_mut() {
+            *entry = random.rand_u64() as u8;
+        }
+
+        // What kind of base64 encoding library needs traits and a prelude?
+        // I maintain that this is insane.
+        use base64::prelude::*;
+        let known_good_encoding = BASE64_STANDARD.encode(&data);
+
+        let mut in_place_buffer = vec![0u8; base64_encode_buffer_size(data.len())];
+        in_place_buffer[0..data.len()].copy_from_slice(&data);
+        base64_encode_in_place(data.len(), &mut in_place_buffer);
+
+        assert_eq!(in_place_buffer, known_good_encoding.as_bytes());
+    }
+}
+
 
 
 
@@ -177,46 +313,45 @@ pub fn encode_cookie<Name: AsRef<str>, Value: AsRef<[u8]>>(key: &SigningKey, nam
 /// returned.
 ///
 /// Inspired by the [cookie](https://crates.io/crates/cookie) crate.
-pub fn decode_cookie<Name: AsRef<str>, Value: AsRef<[u8]>>(key: &SigningKey, name: Name, value: Value) -> Option<Vec<u8>> {
+pub fn decode_cookie(key: &SigningKey, name: impl AsRef<[u8]>, value: impl AsRef<[u8]>, output: &mut [u8]) -> Result<(), DecodeError> {
     use aes_gcm::KeyInit;
     use aes_gcm::aead::Aead;
     use base64::Engine;
+    use aes_gcm::AeadInPlace;
 
     // The binary cipher is base64 encoded
-    let message = base64::engine::general_purpose::STANDARD_NO_PAD.decode(value.as_ref()).ok()?;
+    let message = base64::engine::general_purpose::STANDARD_NO_PAD.decode(value.as_ref()).or(Err(DecodeError))?;
 
     // The binary cipher is constructed as [ nonce, encrypted_value_with_signature ]
     // so we need to split it into it's individual parts
-    let (nonce, cipher) = message.split_at(NONCE_LENGTH);
+    let (nonce, rest_of_message) = message.split_at(NONCE_LENGTH);
+    let (encrypted_message, signature) = rest_of_message.split_at(rest_of_message.len() - SIGNATURE_LENGTH);
+    output.copy_from_slice(encrypted_message);
 
-    /*
-    The API we should have is
-       aes256gcm::decrypt(key: &[u8], nonce: &[u8], expected_associated_data: &[u8], cipher: &[u8]) -> Option<Vec<u8>>
-
-    Instead we have to wrap the first two arguments in GenericArray structs,
-    construct a decryptor object with the wrapped signing key, build a struct containing
-    the cipher text and expected associated data, then call decrypt on the decryptor
-    object passing in the struct and wrapped nonce. I really hope there's a good reason
-    for this API, because if not it's really stupid.
-    */
-
-    // Wrap the slices up in GenericArrays because that's what aes_gcm expects
+    // Wrap the slices up in GenericArrays because that's what aes_gcm requires
     let key_array = aes_gcm::aead::generic_array::GenericArray::from_slice(key);
     let nonce_array = aes_gcm::aead::generic_array::GenericArray::from_slice(nonce);
-
-    // Wrap the cipher and expected associated data in a struct because that's what aes_gcm expects
-    let payload = aes_gcm::aead::Payload {
-        msg: cipher,
-        aad: name.as_ref().as_bytes(),
-    };
-
-    // Build the decryptor object which we'll use to decrypt the cipher text
-    let cipher = aes_gcm::Aes256Gcm::new(key_array);
+    let signature = aes_gcm::aead::generic_array::GenericArray::from_slice(signature);
 
     // Actually decrypt the value!
-    // For security reasons aes_gcm returns no details about the error, just an empty struct.
-    // This prevents side-channel leakage.
-    cipher.decrypt(nonce_array, payload).ok()
+    aes_gcm::Aes256Gcm::new(key_array)
+        .decrypt_in_place_detached(
+            nonce_array,
+            name.as_ref(),
+            output,
+            signature,
+        )
+        .or(Err(DecodeError))
+}
+
+/// The given cookie is not valid.
+///
+/// To avoid side-channel leakage no further information can be returned about the error.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct DecodeError;
+
+pub const fn message_length(encrypted_length: usize) -> usize {
+    todo!()
 }
 
 
@@ -228,47 +363,70 @@ mod test {
 
     #[test]
     fn encode_decode_succeeds() {
-        let key = &generate_signing_key();
+        for i in 0..13 {
+            println!("{}: {}", i, base64_decoded_size(i));
+        }
+        panic!();
+
+        let key = generate_signing_key();
+        let nonce = generate_nonce();
         let name = "session";
         let data = r#"{"id":5}"#;
-        let encoded = encode_cookie(key, name, data);
-        let decoded = decode_cookie(key, name, encoded);
-        assert_eq!(decoded.unwrap(), data.as_bytes());
+
+        let mut encoded = [0u8; decode_buffer_size(8)];
+        encode_cookie(key, nonce, name, data, &mut encoded).unwrap();
+
+        let mut decoded = [0u8; 8];
+        decode_cookie(&key, name, encoded, &mut decoded).unwrap();
+        assert_eq!(decoded, data.as_bytes());
     }
 
     #[test]
     fn different_keys_fails() {
         let key_a = generate_signing_key();
+        let nonce = generate_nonce();
         let name = "session";
         let data = r#"{"id":5}"#;
-        let encoded = encode_cookie(&key_a, name, data);
+
+        let mut encoded = [0u8; decode_buffer_size(8)];
+        encode_cookie(key_a, nonce, name, data, &mut encoded).unwrap();
 
         let key_b = generate_signing_key();
-        let decoded = decode_cookie(&key_b, name, encoded);
+        let mut decoded = [0u8; 8];
+        let decode_result = decode_cookie(&key_b, name, encoded, &mut decoded);
 
-        assert_eq!(decoded, None);
+        assert_eq!(decode_result, Err(DecodeError));
     }
 
     #[test]
     fn different_names_fails() {
-        let key = &generate_signing_key();
+        let key = generate_signing_key();
+        let nonce = generate_nonce();
         let name_a = "session";
         let data = r#"{"id":5}"#;
-        let encoded = encode_cookie(key, name_a, data);
+
+        let mut encoded = [0u8; decode_buffer_size(8)];
+        encode_cookie(key, nonce, name_a, data, &mut encoded).unwrap();
 
         let name_b = "laskdjf";
-        let decoded = decode_cookie(key, name_b, encoded);
+        let mut decoded = [0u8; 8];
+        let decode_result = decode_cookie(&key, name_b, encoded, &mut decoded);
 
-        assert_eq!(decoded, None);
+        assert_eq!(decode_result, Err(DecodeError));
     }
 
     #[test]
     fn identical_values_have_different_ciphers() {
-        let key = &generate_signing_key();
+        let key = generate_signing_key();
         let name = "session";
         let data = "which wolf do you feed?";
-        let encoded_1 = encode_cookie(key, name, data);
-        let encoded_2 = encode_cookie(key, name, data);
+
+        let mut encoded_1 = [0u8; decode_buffer_size(23)];
+        encode_cookie(key, generate_nonce(), name, data, &mut encoded_1).unwrap();
+
+        let mut encoded_2 = [0u8; decode_buffer_size(23)];
+        encode_cookie(key, generate_nonce(), name, data, &mut encoded_2).unwrap();
+
         assert_ne!(encoded_1, encoded_2);
     }
 

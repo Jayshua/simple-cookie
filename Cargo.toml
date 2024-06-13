@@ -11,9 +11,10 @@ description = "Functions for creating and parsing signed & encrypted cookies."
 [dependencies]
 aes-gcm = { version = "0.10.1", features = ["aes"] }
 rand = { version = "0.8.5", default-features = false, optional = true }
-base64 = { version = "0.21.0" }
 
 [features]
+default = ["std", "rand"]
+std = []
 rand = ["rand/std", "rand/std_rng"]
 
 [dev-dependencies]

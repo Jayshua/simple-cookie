@@ -142,9 +142,6 @@ cookies you must guarantee that the provided [Nonce] is filled with cryptographi
 data and the signing key you provide abides by the requirements documented on the [SigningKey] type.
 
 You can use the [encoded_buffer_size] function to get the required size of the output buffer.
-
-The encoded value is always valid ASCII, so this function returns the output buffer as
-an &str so you can avoid calling str::from_utf8() yourself if that's what you wanted.
 */
 pub fn encode_cookie_advanced<'a>(
 	key: SigningKey,
@@ -152,7 +149,7 @@ pub fn encode_cookie_advanced<'a>(
 	name: impl AsRef<[u8]>,
 	value: impl AsRef<[u8]>,
 	output: &'a mut [u8],
-) -> Result<&'a str, OutputBufferWrongSize> {
+) -> Result<(), OutputBufferWrongSize> {
 	let value: &[u8] = value.as_ref();
 
 	let expected_size =
@@ -196,8 +193,7 @@ pub fn encode_cookie_advanced<'a>(
 	// unwrap: encoded data guaranteed to fit, output size checked at start of function
 	encode_bytes_as_ascii(&mut output[..expected_size], total_length).unwrap();
 
-	// unwrap: Base64-encoded, guaranteed to be valid utf8
-	Ok(core::str::from_utf8(&output[..total_length]).unwrap())
+	Ok(())
 }
 
 /// Unable to encode the cookie. Returned from [encode_cookie_advanced].

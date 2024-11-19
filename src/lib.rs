@@ -1,4 +1,5 @@
 #![doc = include_str!("../README.md")]
+#![cfg_attr(not(feature = "std"), no_std)]
 
 /// Key used to sign, encrypt, decrypt & verify your cookies
 ///

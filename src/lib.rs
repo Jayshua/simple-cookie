@@ -1,5 +1,5 @@
 #![doc = include_str!("../README.md")]
-#![cfg_attr(all(not(test), not(debug_assertions)), no_std)]
+#![cfg_attr(not(feature="std"), no_std)]
 
 
 
@@ -30,7 +30,7 @@ const SIGNATURE_LENGTH: usize = 16;
 ///
 /// This uses the thread-local random number generator, which is guaranteed by the rand crate
 /// to produce cryptographically secure random data.
-#[cfg(any(test, feature="rand"))]
+#[cfg(feature="rand")]
 pub fn generate_signing_key() -> SigningKey {
 	let mut data = [0; 32];
 	rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut data);
@@ -43,7 +43,7 @@ pub fn generate_signing_key() -> SigningKey {
 ///
 /// This uses the thread-local random number generator, which is guaranteed by the rand crate
 /// to produce cryptographically secure random data.
-#[cfg(any(test, feature="rand"))]
+#[cfg(feature="rand")]
 pub fn generate_nonce() -> Nonce {
 	let mut data = [0; 12];
 	rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut data);
@@ -80,7 +80,7 @@ pub fn parse_cookie_header_value(header: &[u8]) -> impl Iterator<Item = (&str, &
 			let key: &[u8] = key.trim_ascii();
 			let key: &str = core::str::from_utf8(key).ok()?;
 
-			let value: &[u8] =key_value_iterator.next()?.trim_ascii();
+			let value: &[u8] = key_value_iterator.next()?.trim_ascii();
 			let value: &[u8] = value.strip_prefix(&[b'"']).unwrap_or(value);
 			let value: &[u8] = value.strip_suffix(&[b'"']).unwrap_or(value);
 
@@ -133,6 +133,8 @@ pub fn encode_cookie(key: SigningKey, name: impl AsRef<[u8]>, value: impl AsRef<
 	encode_cookie_advanced(key, nonce, name, value, &mut output).expect("unreachable, the buffer should always be correctly sized");
 	String::from_utf8(output).expect("unreachable, encode_cookie_advanced should always produce ascii data")
 }
+
+
 
 /**
 Just like [encode_cookie], but advanced.
@@ -205,6 +207,7 @@ pub struct OutputBufferWrongSize {
 }
 
 
+
 /**
 Get the required size of the output buffer passed to encode_cookie for the given input buffer length
 
@@ -220,6 +223,7 @@ pub const fn encoded_buffer_size(value_length: usize) -> Option<usize> {
 		Some((NONCE_LENGTH + value_length + SIGNATURE_LENGTH) * 2)
 	}
 }
+
 
 
 /**
@@ -243,10 +247,6 @@ pub const fn decode_buffer_size(value_length: usize) -> Option<usize> {
 
 
 
-
-
-
-
 /**
 Decrypt & verify the signature of a cookie value.
 
@@ -263,6 +263,7 @@ Returns `Err(DecodeCookieError)` if the value argument is empty.
 
 Inspired by the [cookie](https://crates.io/crates/cookie) crate.
 */
+#[cfg(feature="std")]
 pub fn decode_cookie(key: SigningKey, name: impl AsRef<[u8]>, value: impl AsRef<[u8]>) -> Result<Vec<u8>, DecodeError> {
 	let Some(output_buffer_length) = decode_buffer_size(value.as_ref().len()) else {
 		return Err(DecodeError);
@@ -275,6 +276,7 @@ pub fn decode_cookie(key: SigningKey, name: impl AsRef<[u8]>, value: impl AsRef<
 		Err(reason) => Err(reason),
 	}
 }
+
 
 
 /**
@@ -330,9 +332,6 @@ pub fn decode_cookie_advanced(key: SigningKey, name: impl AsRef<[u8]>, value: im
 /// To avoid side-channel leakage no further information can be returned about the error.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct DecodeError;
-
-
-
 
 
 
@@ -395,6 +394,7 @@ fn encode_bytes_as_ascii<'a>(input: &'a mut [u8], length: usize) -> Option<&'a m
 }
 
 
+
 /**
 Decode bytes encoded with [encode_bytes_as_ascii].
 
@@ -424,14 +424,12 @@ fn decode_ascii_as_bytes<'a>(input: &[u8], output: &'a mut [u8], from: usize, to
 
 
 
-
 #[cfg(test)]
 mod test {
 	use super::*;
 
 	pub fn init_random() -> oorandom::Rand64 {
-		// let seed = rand::Rng::gen_range(&mut rand::thread_rng(), 100_000_000..999_999_999);
-		let seed = 473483852;
+		let seed = rand::Rng::gen_range(&mut rand::thread_rng(), 100_000_000..999_999_999);
 		println!("Seed: {}", seed);
 		oorandom::Rand64::new(seed)
 	}
